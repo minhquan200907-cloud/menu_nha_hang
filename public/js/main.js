@@ -1,0 +1,1 @@
+console.log("Hệ thống Quản lý Nhà hàng đã sẵn sàng!");
