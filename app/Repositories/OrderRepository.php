@@ -55,6 +55,99 @@ class OrderRepository {
         }
     }
 
+    /**
+     * Cộng dồn món ăn mới vào đơn hàng đang mở của bàn
+     */
+    public function addItemsToExistingOrder($tableNumber, $items) {
+        try {
+            // 1. Lấy đơn hàng chưa hoàn thành của bàn này
+            $stmt = $this->db->prepare("
+                SELECT id FROM orders 
+                WHERE table_number = ? 
+                AND status NOT IN ('completed', 'Đã thanh toán', 'Hoàn Thành') 
+                ORDER BY id DESC LIMIT 1
+            ");
+            $stmt->execute([$tableNumber]);
+            $order = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$order) {
+                return false;
+            }
+
+            $orderId = $order['id'];
+            $addedTotal = 0;
+
+            foreach ($items as $item) {
+                $menuItemId = $item['menu_item_id'];
+                $quantity = (int)$item['quantity'];
+                $price = (float)$item['price'];
+                $itemTotal = $price * $quantity;
+
+                // Kiểm tra xem món này đã có trong đơn hàng chưa
+                $stmtCheck = $this->db->prepare("
+                    SELECT id, quantity FROM order_details 
+                    WHERE order_id = ? AND menu_item_id = ?
+                ");
+                $stmtCheck->execute([$orderId, $menuItemId]);
+                $existingDetail = $stmtCheck->fetch(PDO::FETCH_ASSOC);
+
+                if ($existingDetail) {
+                    // Món đã có -> Tăng số lượng
+                    $newQty = (int)$existingDetail['quantity'] + $quantity;
+                    try {
+                        $stmtUpdate = $this->db->prepare("
+                            UPDATE order_details 
+                            SET quantity = ?, total_price = total_price + ? 
+                            WHERE id = ?
+                        ");
+                        $stmtUpdate->execute([$newQty, $itemTotal, $existingDetail['id']]);
+                    } catch (PDOException $ex) {
+                        // Trường hợp bảng order_details không có cột total_price
+                        $stmtUpdate = $this->db->prepare("
+                            UPDATE order_details 
+                            SET quantity = ? 
+                            WHERE id = ?
+                        ");
+                        $stmtUpdate->execute([$newQty, $existingDetail['id']]);
+                    }
+                } else {
+                    // Món chưa có -> Thêm dòng mới
+                    try {
+                        $stmtInsert = $this->db->prepare("
+                            INSERT INTO order_details (order_id, menu_item_id, quantity, price, total_price) 
+                            VALUES (?, ?, ?, ?, ?)
+                        ");
+                        $stmtInsert->execute([$orderId, $menuItemId, $quantity, $price, $itemTotal]);
+                    } catch (PDOException $ex) {
+                        // Trường hợp bảng order_details không có cột total_price
+                        $stmtInsert = $this->db->prepare("
+                            INSERT INTO order_details (order_id, menu_item_id, quantity, price) 
+                            VALUES (?, ?, ?, ?)
+                        ");
+                        $stmtInsert->execute([$orderId, $menuItemId, $quantity, $price]);
+                    }
+                }
+
+                $addedTotal += $itemTotal;
+            }
+
+            // 2. Cập nhật lại tổng tiền đơn hàng
+            if ($addedTotal > 0) {
+                $stmtUpdateOrder = $this->db->prepare("
+                    UPDATE orders 
+                    SET total_amount = total_amount + ? 
+                    WHERE id = ?
+                ");
+                $stmtUpdateOrder->execute([$addedTotal, $orderId]);
+            }
+
+            return true;
+        } catch (PDOException $e) {
+            echo "Lỗi CSDL khi gọi thêm món: " . htmlspecialchars($e->getMessage());
+            exit();
+        }
+    }
+
     public function createOrder($tableNumber, $customerName, $items) {
         try {
             // Lấy user_id từ Session nếu có
@@ -109,18 +202,24 @@ class OrderRepository {
             $orderId = $this->db->lastInsertId();
 
             // 4. Lưu danh sách món chi tiết
-            $stmtDetail = $this->db->prepare("
-                INSERT INTO order_details (order_id, menu_item_id, quantity, price) 
-                VALUES (?, ?, ?, ?)
-            ");
-
             foreach ($items as $item) {
-                $stmtDetail->execute([
-                    $orderId,
-                    $item['menu_item_id'],
-                    $item['quantity'],
-                    $item['price']
-                ]);
+                $price = (float)$item['price'];
+                $quantity = (int)$item['quantity'];
+                $itemTotal = $price * $quantity;
+
+                try {
+                    $stmtDetail = $this->db->prepare("
+                        INSERT INTO order_details (order_id, menu_item_id, quantity, price, total_price) 
+                        VALUES (?, ?, ?, ?, ?)
+                    ");
+                    $stmtDetail->execute([$orderId, $item['menu_item_id'], $quantity, $price, $itemTotal]);
+                } catch (PDOException $ex) {
+                    $stmtDetail = $this->db->prepare("
+                        INSERT INTO order_details (order_id, menu_item_id, quantity, price) 
+                        VALUES (?, ?, ?, ?)
+                    ");
+                    $stmtDetail->execute([$orderId, $item['menu_item_id'], $quantity, $price]);
+                }
             }
 
             return true;

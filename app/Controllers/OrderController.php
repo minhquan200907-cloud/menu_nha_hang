@@ -8,11 +8,23 @@ class OrderController extends Controller {
     private $menuRepo;
 
     public function __construct() {
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
+
         if (!isset($_SESSION['user'])) {
             $this->redirect('index.php?controller=auth&action=login');
+            exit();
         }
         $this->orderRepo = new OrderRepository();
         $this->menuRepo = new MenuRepository();
+    }
+
+    /**
+     * Lấy role người dùng hiện tại an toàn
+     */
+    private function getUserRole() {
+        return $_SESSION['user']['role'] ?? $_SESSION['role'] ?? 'staff';
     }
 
     public function index() {
@@ -54,20 +66,12 @@ class OrderController extends Controller {
     }
 
     /**
-     * Nhân viên & Admin đều có thể tạo đơn hàng
+     * Nhân viên & Admin tạo đơn mới hoặc gọi thêm món vào bàn đang mở
      */
     public function create() {
-        $tableNumber = $_REQUEST['table_number'] ?? 1;
-        $customerName = !empty($_REQUEST['customer_name']) ? trim($_REQUEST['customer_name']) : 'Khách tại bàn';
+        $tableNumber = (int)($_REQUEST['table_number'] ?? 1);
+        $customerName = !empty($_REQUEST['customer_name']) ? trim($_REQUEST['customer_name']) : 'Khách lẻ';
         $selectedItems = $_REQUEST['items'] ?? []; 
-
-        if ($this->orderRepo->isTableOccupied($tableNumber)) {
-            echo "<script>
-                alert('Bàn " . htmlspecialchars($tableNumber) . " đang có đơn hàng chưa hoàn thành! Vui lòng chọn bàn khác.');
-                window.history.back();
-            </script>";
-            exit();
-        }
 
         $items = [];
         foreach ($selectedItems as $itemId => $qty) {
@@ -77,6 +81,13 @@ class OrderController extends Controller {
                 if ($menuItem) {
                     $itemData = is_object($menuItem) ? (array)$menuItem : $menuItem;
                     
+                    // Kiểm tra trạng thái món ăn
+                    $status = $itemData['status'] ?? 'Sẵn sàng';
+                    $isAvailable = ($status === 'Sẵn sàng' || $status === 'available' || $status == 1);
+                    if (!$isAvailable) {
+                        continue; // Bỏ qua món đã hết hàng
+                    }
+
                     $items[] = [
                         'menu_item_id' => $itemId,
                         'quantity'     => $quantity,
@@ -87,11 +98,25 @@ class OrderController extends Controller {
         }
 
         if (empty($items)) {
-            echo "<script>alert('Vui lòng chọn số lượng ít nhất 1 món ăn lớn hơn 0!'); window.history.back();</script>";
+            echo "<script>alert('Vui lòng chọn số lượng ít nhất 1 món ăn còn hàng!'); window.history.back();</script>";
             exit();
         }
 
-        $this->orderRepo->createOrder($tableNumber, $customerName, $items);
+        // Kiểm tra bàn có đơn chưa hoàn thành
+        $isOccupied = $this->orderRepo->isTableOccupied($tableNumber);
+
+        if ($isOccupied) {
+            if (method_exists($this->orderRepo, 'addItemsToExistingOrder')) {
+                // Tự động gộp món vào đơn chưa hoàn thành của bàn
+                $this->orderRepo->addItemsToExistingOrder($tableNumber, $items);
+            } else {
+                echo "<script>alert('Bàn " . htmlspecialchars((string)$tableNumber) . " đang có đơn chưa hoàn thành!'); window.history.back();</script>";
+                exit();
+            }
+        } else {
+            // Tạo đơn hàng mới nếu bàn trống
+            $this->orderRepo->createOrder($tableNumber, $customerName, $items);
+        }
 
         $this->redirect('index.php?controller=order&action=index');
     }
@@ -100,8 +125,7 @@ class OrderController extends Controller {
      * Chỉ Admin mới được đổi trạng thái đơn hàng (Thanh toán/Hoàn thành)
      */
     public function updateStatus() {
-        $role = $_SESSION['user']['role'] ?? '';
-        if ($role !== 'admin') {
+        if ($this->getUserRole() !== 'admin') {
             echo "<script>alert('Bạn không có quyền thực hiện thao tác này!'); window.history.back();</script>";
             exit();
         }
@@ -120,8 +144,7 @@ class OrderController extends Controller {
      * Chỉ Admin mới được xóa đơn hàng
      */
     public function delete() {
-        $role = $_SESSION['user']['role'] ?? '';
-        if ($role !== 'admin') {
+        if ($this->getUserRole() !== 'admin') {
             echo "<script>alert('Bạn không có quyền xóa đơn hàng!'); window.history.back();</script>";
             exit();
         }
